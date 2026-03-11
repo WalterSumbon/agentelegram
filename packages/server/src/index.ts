@@ -11,6 +11,7 @@ import { createServer } from 'node:http';
 import { WebSocketServer } from 'ws';
 import { initDb, closeDb, getPool } from './db.js';
 import { authRouter, requireAuth } from './auth.js';
+import { managementRouter } from './management.js';
 import { setupWsHandler } from './ws-handler.js';
 
 const PORT = parseInt(process.env.PORT ?? '4000', 10);
@@ -30,6 +31,9 @@ async function main(): Promise<void> {
 
   // Auth routes
   app.use('/api/auth', authRouter);
+
+  // Agent management routes
+  app.use('/api/agents', managementRouter);
 
   // REST: list all participants (for creating conversations) — requires JWT
   app.get('/api/participants', requireAuth, async (_req, res) => {

@@ -3,6 +3,7 @@
 // ---------------------------------------------------------------------------
 
 import type { Message, Conversation } from './types.js';
+import type { MgmtAction } from './management.js';
 
 // ---------------------------------------------------------------------------
 // Participant → Server events
@@ -17,7 +18,8 @@ export type ClientEventType =
   | 'create_conversation'
   | 'delete_conversation'
   | 'list_conversations'
-  | 'get_history';
+  | 'get_history'
+  | 'mgmt_response';    // agent → server: response to a management request
 
 export interface ClientEvent {
   type: ClientEventType;
@@ -52,6 +54,16 @@ export interface ClientEvent {
   /** Cursor for pagination (message ID or timestamp). */
   before?: string;
   limit?: number;
+
+  // -- mgmt_response (agent → server) --
+  /** Correlation ID matching the original mgmt_request. */
+  requestId?: string;
+  /** Whether the management operation succeeded. */
+  success?: boolean;
+  /** Response payload (action-specific). */
+  data?: unknown;
+  /** Error message when success is false. */
+  mgmtError?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -70,7 +82,8 @@ export type ServerEventType =
   | 'conversation_deleted'
   | 'conversations'
   | 'history'
-  | 'error';
+  | 'error'
+  | 'mgmt_request';     // server → agent: management request forwarded from REST API
 
 export interface ServerEvent {
   type: ServerEventType;
@@ -122,6 +135,14 @@ export interface ServerEvent {
     code: string;
     message: string;
   };
+
+  // -- mgmt_request (server → agent) --
+  /** Correlation ID for matching request → response. */
+  requestId?: string;
+  /** Management action to perform. */
+  action?: MgmtAction;
+  /** Action-specific payload. */
+  payload?: Record<string, unknown>;
 
   /** Allow additional fields for forward compatibility. */
   [key: string]: unknown;

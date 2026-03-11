@@ -21,10 +21,15 @@ import {
 } from '../store';
 import { connectWs, disconnectWs, sendWsEvent, onWsEvent, onWsConnect } from '../ws';
 import { listParticipants, getConversationMembers } from '../api';
+import { AgentList, AgentManagementPanel } from './AgentPanel';
+
+type SidebarMode = 'chats' | 'agents';
 
 export default function ChatPage() {
   const store = useStore();
   const { user, token, conversations, activeConversationId, messages, streamingMessages, typingStates, participantCache } = store;
+  const [sidebarMode, setSidebarMode] = useState<SidebarMode>('chats');
+  const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
 
   useEffect(() => {
     if (!token) return;
@@ -127,27 +132,63 @@ export default function ChatPage() {
             ⏻
           </button>
         </div>
-        <NewConversationButton currentUserId={user?.id ?? ''} participantCache={participantCache} />
-        <div className="conversation-list">
-          {conversations.map((c) => (
-            <ConversationItem
-              key={c.id}
-              conv={c}
-              active={c.id === activeConversationId}
-              onClick={() => setActiveConversation(c.id)}
-              participantCache={participantCache}
-              currentUserId={user?.id ?? ''}
-            />
-          ))}
-          {conversations.length === 0 && (
-            <div className="empty-hint">No conversations yet</div>
-          )}
+
+        {/* Sidebar mode tabs */}
+        <div className="sidebar-tabs">
+          <button
+            className={`sidebar-tab ${sidebarMode === 'chats' ? 'active' : ''}`}
+            onClick={() => setSidebarMode('chats')}
+          >
+            Chats
+          </button>
+          <button
+            className={`sidebar-tab ${sidebarMode === 'agents' ? 'active' : ''}`}
+            onClick={() => setSidebarMode('agents')}
+          >
+            Agents
+          </button>
         </div>
+
+        {sidebarMode === 'chats' ? (
+          <>
+            <NewConversationButton currentUserId={user?.id ?? ''} participantCache={participantCache} />
+            <div className="conversation-list">
+              {conversations.map((c) => (
+                <ConversationItem
+                  key={c.id}
+                  conv={c}
+                  active={c.id === activeConversationId}
+                  onClick={() => setActiveConversation(c.id)}
+                  participantCache={participantCache}
+                  currentUserId={user?.id ?? ''}
+                />
+              ))}
+              {conversations.length === 0 && (
+                <div className="empty-hint">No conversations yet</div>
+              )}
+            </div>
+          </>
+        ) : (
+          <div className="conversation-list">
+            <AgentList
+              selectedAgentId={selectedAgentId}
+              onSelect={(id) => setSelectedAgentId(id)}
+            />
+          </div>
+        )}
       </aside>
 
-      {/* Main chat area */}
+      {/* Main content area */}
       <main className="chat-main">
-        {activeConversationId ? (
+        {sidebarMode === 'agents' ? (
+          selectedAgentId ? (
+            <AgentManagementPanel agentId={selectedAgentId} />
+          ) : (
+            <div className="no-chat-selected">
+              <p>Select an agent to manage</p>
+            </div>
+          )
+        ) : activeConversationId ? (
           <>
             <ChatHeader
               conv={activeConv}

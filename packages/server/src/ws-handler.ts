@@ -13,7 +13,8 @@ import type { IncomingMessage } from 'node:http';
 import jwt from 'jsonwebtoken';
 import { JWT_SECRET, verifyApiKey } from './auth.js';
 import { getPool } from './db.js';
-import type { ClientEvent, ServerEvent, Conversation } from '@agentelegram/shared';
+import type { ClientEvent, ServerEvent, Conversation, MgmtAction } from '@agentelegram/shared';
+import { randomUUID } from 'node:crypto';
 
 interface AuthPayload {
   sub: string;   // participant id
@@ -40,6 +41,23 @@ const streamingMessages = new Map<string, StreamingMessage>();
 
 /** Timeout (ms) for the client to send the auth message after connecting. */
 const AUTH_TIMEOUT_MS = 10_000;
+
+/** Timeout (ms) for an agent to respond to a management request. */
+const MGMT_REQUEST_TIMEOUT_MS = 15_000;
+
+// ---------------------------------------------------------------------------
+// Management request-response correlation
+// ---------------------------------------------------------------------------
+
+interface PendingMgmtRequest {
+  resolve: (data: unknown) => void;
+  reject: (error: Error) => void;
+  timeout: ReturnType<typeof setTimeout>;
+  targetAgentId: string;
+}
+
+/** requestId → pending request */
+const pendingMgmtRequests = new Map<string, PendingMgmtRequest>();
 
 /**
  * Set up WebSocket server event handling.
@@ -113,6 +131,15 @@ export function setupWsHandler(wss: WebSocketServer): void {
       if (set) {
         set.delete(ws);
         if (set.size === 0) connections.delete(auth.sub);
+      }
+
+      // Clean up pending management requests targeting this agent
+      for (const [reqId, pending] of pendingMgmtRequests.entries()) {
+        if (pending.targetAgentId === auth.sub) {
+          pendingMgmtRequests.delete(reqId);
+          clearTimeout(pending.timeout);
+          pending.reject(new Error('agent is offline'));
+        }
       }
 
       // Clean up orphaned streaming messages from this participant.
@@ -189,6 +216,8 @@ async function handleClientEvent(ws: WebSocket, auth: AuthPayload, event: Client
       return handleGetHistory(ws, auth, event);
     case 'typing':
       return handleTyping(auth, event);
+    case 'mgmt_response':
+      return handleMgmtResponse(auth, event);
     default:
       sendEvent(ws, { type: 'error', error: { code: 'UNKNOWN_EVENT', message: `unknown event: ${event.type}` } });
   }
@@ -592,4 +621,95 @@ function broadcastToParticipant(participantId: string, event: ServerEvent): void
       ws.send(data);
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Management protocol — request-response over WebSocket
+// ---------------------------------------------------------------------------
+
+/**
+ * Handle mgmt_response from an agent — resolve the pending REST request.
+ */
+function handleMgmtResponse(auth: AuthPayload, event: ClientEvent): void {
+  const { requestId } = event;
+  if (!requestId) return;
+
+  // Only agents may send mgmt_response
+  if (auth.type !== 'agent') {
+    console.warn(`[ws] mgmt_response from non-agent participant: ${auth.name}`);
+    return;
+  }
+
+  const pending = pendingMgmtRequests.get(requestId);
+  if (!pending) {
+    console.warn(`[ws] mgmt_response for unknown requestId: ${requestId}`);
+    return;
+  }
+
+  // Verify the response is from the expected agent
+  if (pending.targetAgentId !== auth.sub) {
+    console.warn(`[ws] mgmt_response from wrong agent: expected ${pending.targetAgentId}, got ${auth.sub}`);
+    return;
+  }
+
+  pendingMgmtRequests.delete(requestId);
+  clearTimeout(pending.timeout);
+
+  if (event.success) {
+    pending.resolve(event.data);
+  } else {
+    pending.reject(new Error(event.mgmtError ?? 'agent rejected management request'));
+  }
+}
+
+/**
+ * Check if a participant (agent) is currently connected.
+ */
+export function isParticipantOnline(participantId: string): boolean {
+  const sockets = connections.get(participantId);
+  if (!sockets || sockets.size === 0) return false;
+  // Check at least one socket is actually open
+  for (const ws of sockets) {
+    if (ws.readyState === ws.OPEN) return true;
+  }
+  return false;
+}
+
+/**
+ * Send a management request to an agent and wait for its response.
+ *
+ * Called by REST API route handlers — translates REST → WebSocket → REST.
+ *
+ * @throws Error if agent is offline, request times out, or agent rejects.
+ */
+export function sendMgmtRequest(
+  agentId: string,
+  action: MgmtAction,
+  payload?: Record<string, unknown>,
+): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    if (!isParticipantOnline(agentId)) {
+      reject(new Error('agent is offline'));
+      return;
+    }
+
+    const requestId = randomUUID();
+
+    const timeout = setTimeout(() => {
+      pendingMgmtRequests.delete(requestId);
+      reject(new Error('management request timed out'));
+    }, MGMT_REQUEST_TIMEOUT_MS);
+
+    pendingMgmtRequests.set(requestId, { resolve, reject, timeout, targetAgentId: agentId });
+
+    // Send mgmt_request to the agent via WebSocket
+    const mgmtEvent: ServerEvent = {
+      type: 'mgmt_request',
+      requestId,
+      action,
+      payload,
+    };
+
+    broadcastToParticipant(agentId, mgmtEvent);
+  });
 }
