@@ -19,12 +19,33 @@
 - [x] 实时消息推送（WebSocket fan-out，跨用户即时可见）
 - **验收**：一个人类用户能登录、创建会话、发消息并在页面上看到 ✅
 
-## M2：Agent 接入
-- [ ] Agent 用同一套 WebSocket 协议连接（API key 认证）
-- [ ] 流式支持：send_message_delta + send_message_done
-- [ ] Server 端内容累积 + 持久化
-- [ ] Agent typing/thinking 状态展示
-- **验收**：Better-Claw 作为 agent 连入，人类发消息后 agent 能流式回复，前端实时渲染
+## M2：Agent 接入 ✅
+- [x] Agent 注册 REST API（API key 认证）
+- [x] Agent 用同一套 WebSocket 协议连接
+- [x] 流式支持：send_message_delta + send_message_done
+- [x] Server 端内容累积 + 持久化
+- [x] Agent typing/thinking 状态展示
+- [x] 前端流式消息渲染（光标动画）+ agent 头像标识
+- [x] E2E 测试脚本（mock-agent echo bot）
+- **验收**：mock-agent 通过 API key 连入，人类发消息后 agent 流式 echo 回复，前端实时渲染 ✅
+
+### M2 Code Review 发现的问题及修复（commit `526f041`）
+
+**问题 1：API key 通过 URL query string 传递**
+- 现象：agent 连 WebSocket 时 API key 放在 `ws://host/ws?apikey=xxx`，凭据会泄漏到服务器日志、反向代理日志、浏览器历史记录
+- 根因：浏览器原生 WebSocket API 不支持自定义 Header，最初选了最简单的 query string 方案
+- 修复：改为连接后首条消息认证。客户端发 `{ type: "auth", token/apiKey }`，服务端验证后回复 `auth_ok`，10 秒超时未认证自动断开。凭据走 WebSocket 数据帧，不出现在 URL 中
+
+**问题 2：register-agent 端点无鉴权**
+- 现象：`POST /api/auth/register-agent` 无需任何认证，任何人可以批量注册 agent 拿到 API key
+- 风险：未授权 agent 注入、数据库 DoS、恶意 agent 参与对话
+- 修复：加 `requireAuth` 中间件，需要 `Authorization: Bearer <jwt>`。只有登录的人类用户才能注册 agent
+
+**问题 3：verifyApiKey O(N) bcrypt 全表扫描**
+- 现象：每次 agent 认证需要 `SELECT * FROM participants WHERE type='agent'` 捞出所有 agent，逐个做 bcrypt.compare（每次 ~100ms）
+- 风险：N 个 agent = 最坏 N×100ms 认证延迟，容易被利用做 DoS
+- 根因：bcrypt 加盐哈希无法直接 WHERE 查找
+- 修复：participants 表新增 `key_prefix` 列（API key 前 8 字符）+ partial index，查询先按 prefix 定位（通常 1 条），再做 1 次 bcrypt。O(N) → 实质 O(1)
 
 ## M3：群聊
 - [ ] Group conversation 支持
