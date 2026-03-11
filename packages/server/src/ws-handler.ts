@@ -12,7 +12,7 @@ import type { IncomingMessage } from 'node:http';
 import jwt from 'jsonwebtoken';
 import { JWT_SECRET, verifyApiKey } from './auth.js';
 import { getPool } from './db.js';
-import type { ClientEvent, ServerEvent } from '@agentelegram/shared';
+import type { ClientEvent, ServerEvent, Conversation } from '@agentelegram/shared';
 
 interface AuthPayload {
   sub: string;   // participant id
@@ -32,7 +32,7 @@ interface StreamingMessage {
   conversationId: string;
   senderId: string;
   content: string;      // accumulated content so far
-  contentType: string;
+  contentType: 'text' | 'file' | 'image' | 'mixed';
   startedAt: number;
 }
 const streamingMessages = new Map<string, StreamingMessage>();
@@ -181,16 +181,16 @@ async function handleCreateConversation(ws: WebSocket, auth: AuthPayload, event:
     );
   }
 
-  const conversation = {
+  const conversation: Conversation = {
     id: conv.id,
     title: conv.title,
-    type: conv.type,
+    type: conv.type as 'direct' | 'group',
     createdBy: conv.created_by,
     createdAt: Number(conv.created_at),
     updatedAt: Number(conv.updated_at),
   };
 
-  const fullEvent = { type: 'conversation_created' as const, conversationId: conv.id, conversation };
+  const fullEvent: ServerEvent = { type: 'conversation_created', conversationId: conv.id, conversation };
   for (const pid of participantIds) {
     broadcastToParticipant(pid, fullEvent);
   }
@@ -292,7 +292,7 @@ async function handleSendMessageDelta(ws: WebSocket, auth: AuthPayload, event: C
   }
 
   const db = getPool();
-  let messageId = event.messageId;
+  let messageId: string = event.messageId ?? '';
 
   if (!messageId) {
     // First delta — allocate a message row with empty content (will be updated on done)
@@ -311,7 +311,7 @@ async function handleSendMessageDelta(ws: WebSocket, auth: AuthPayload, event: C
        RETURNING id, timestamp`,
       [event.conversationId, auth.sub]
     );
-    messageId = msgResult.rows[0].id;
+    messageId = msgResult.rows[0].id as string;
 
     // Initialize streaming state
     streamingMessages.set(messageId, {
@@ -511,13 +511,13 @@ async function handleTyping(auth: AuthPayload, event: ClientEvent): Promise<void
 // Helpers
 // ---------------------------------------------------------------------------
 
-function sendEvent(ws: WebSocket, event: ServerEvent & Record<string, unknown>): void {
+function sendEvent(ws: WebSocket, event: ServerEvent): void {
   if (ws.readyState === ws.OPEN) {
     ws.send(JSON.stringify(event));
   }
 }
 
-function broadcastToParticipant(participantId: string, event: ServerEvent & Record<string, unknown>): void {
+function broadcastToParticipant(participantId: string, event: ServerEvent): void {
   const sockets = connections.get(participantId);
   if (!sockets) return;
   const data = JSON.stringify(event);

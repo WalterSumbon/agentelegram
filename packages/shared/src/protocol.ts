@@ -69,7 +69,7 @@ export interface ServerEvent {
 
   conversationId?: string;
 
-  // -- message --
+  // -- message / message_done --
   message?: Message;
 
   // -- message_delta --
@@ -92,6 +92,9 @@ export interface ServerEvent {
   participantId?: string;
   activity?: string;
 
+  // -- conversation_created --
+  conversation?: Conversation;
+
   // -- conversations --
   conversations?: Conversation[];
 
@@ -104,4 +107,7 @@ export interface ServerEvent {
     code: string;
     message: string;
   };
+
+  /** Allow additional fields for forward compatibility. */
+  [key: string]: unknown;
 }
