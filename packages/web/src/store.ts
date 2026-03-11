@@ -39,12 +39,32 @@ export interface ChatMessage {
   timestamp: number;
 }
 
+/** A streaming (in-progress) message — not yet finalized. */
+export interface StreamingMessage {
+  id: string;
+  conversationId: string;
+  senderId: string;
+  content: string; // accumulated so far
+}
+
+/** Typing indicator state */
+export interface TypingState {
+  participantId: string;
+  activity: string;
+  /** Auto-expire timestamp */
+  expiresAt: number;
+}
+
 interface AppState {
   user: User | null;
   token: string | null;
   conversations: ConversationInfo[];
   activeConversationId: string | null;
   messages: Map<string, ChatMessage[]>; // conversationId → messages
+  /** In-progress streaming messages: messageId → StreamingMessage */
+  streamingMessages: Map<string, StreamingMessage>;
+  /** Active typing indicators: conversationId → TypingState[] */
+  typingStates: Map<string, TypingState[]>;
   /** participant id → display info */
   participantCache: Map<string, User>;
 }
@@ -59,6 +79,8 @@ let state: AppState = {
   conversations: [],
   activeConversationId: null,
   messages: new Map(),
+  streamingMessages: new Map(),
+  typingStates: new Map(),
   participantCache: new Map(),
 };
 
@@ -102,6 +124,8 @@ export function clearAuth() {
   state.conversations = [];
   state.activeConversationId = null;
   state.messages = new Map();
+  state.streamingMessages = new Map();
+  state.typingStates = new Map();
   localStorage.removeItem('token');
   localStorage.removeItem('user');
   emit();
@@ -181,4 +205,101 @@ export function cacheParticipants(participants: User[]) {
 
 export function getParticipantName(id: string): string {
   return state.participantCache.get(id)?.displayName ?? id.slice(0, 8);
+}
+
+// ---------------------------------------------------------------------------
+// Streaming message actions
+// ---------------------------------------------------------------------------
+
+export function applyDelta(conversationId: string, messageId: string, senderId: string, deltaContent: string) {
+  state.streamingMessages = new Map(state.streamingMessages);
+  const existing = state.streamingMessages.get(messageId);
+  if (existing) {
+    state.streamingMessages.set(messageId, {
+      ...existing,
+      content: existing.content + deltaContent,
+    });
+  } else {
+    state.streamingMessages.set(messageId, {
+      id: messageId,
+      conversationId,
+      senderId,
+      content: deltaContent,
+    });
+  }
+  // Clear typing indicator for this participant (they're now streaming)
+  clearTyping(conversationId, senderId);
+  emit();
+}
+
+export function finalizeStreamingMessage(messageId: string, finalMessage?: ChatMessage) {
+  const streaming = state.streamingMessages.get(messageId);
+  state.streamingMessages = new Map(state.streamingMessages);
+  state.streamingMessages.delete(messageId);
+
+  if (finalMessage) {
+    // Add as a regular completed message
+    addMessage(finalMessage);
+  } else if (streaming) {
+    // Fallback: construct from streaming state
+    addMessage({
+      id: streaming.id,
+      conversationId: streaming.conversationId,
+      senderId: streaming.senderId,
+      content: streaming.content,
+      contentType: 'text',
+      timestamp: Date.now(),
+    });
+  }
+  // emit() is called by addMessage
+}
+
+/**
+ * Get all streaming messages for a given conversation.
+ */
+export function getStreamingMessages(conversationId: string): StreamingMessage[] {
+  const result: StreamingMessage[] = [];
+  for (const sm of state.streamingMessages.values()) {
+    if (sm.conversationId === conversationId) {
+      result.push(sm);
+    }
+  }
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// Typing state actions
+// ---------------------------------------------------------------------------
+
+const TYPING_TIMEOUT_MS = 5000;
+
+export function setTyping(conversationId: string, participantId: string, activity: string) {
+  state.typingStates = new Map(state.typingStates);
+  const existing = state.typingStates.get(conversationId) ?? [];
+  const filtered = existing.filter((t) => t.participantId !== participantId);
+  filtered.push({ participantId, activity, expiresAt: Date.now() + TYPING_TIMEOUT_MS });
+  state.typingStates.set(conversationId, filtered);
+  emit();
+
+  // Auto-expire
+  setTimeout(() => {
+    clearTyping(conversationId, participantId);
+  }, TYPING_TIMEOUT_MS);
+}
+
+export function clearTyping(conversationId: string, participantId: string) {
+  const existing = state.typingStates.get(conversationId);
+  if (!existing) return;
+  const filtered = existing.filter((t) => t.participantId !== participantId);
+  state.typingStates = new Map(state.typingStates);
+  if (filtered.length === 0) {
+    state.typingStates.delete(conversationId);
+  } else {
+    state.typingStates.set(conversationId, filtered);
+  }
+  emit();
+}
+
+export function getTypingStates(conversationId: string): TypingState[] {
+  return (state.typingStates.get(conversationId) ?? []).filter((t) => t.expiresAt > Date.now());
 }

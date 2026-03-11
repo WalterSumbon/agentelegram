@@ -8,6 +8,11 @@ import {
   addMessage,
   cacheParticipants,
   clearAuth,
+  applyDelta,
+  finalizeStreamingMessage,
+  getStreamingMessages,
+  setTyping,
+  getTypingStates,
   type ConversationInfo,
   type ChatMessage,
 } from '../store';
@@ -16,7 +21,7 @@ import { listParticipants, getConversationMembers } from '../api';
 
 export default function ChatPage() {
   const store = useStore();
-  const { user, token, conversations, activeConversationId, messages, participantCache } = store;
+  const { user, token, conversations, activeConversationId, messages, streamingMessages, typingStates, participantCache } = store;
 
   useEffect(() => {
     if (!token) return;
@@ -43,6 +48,22 @@ export default function ChatPage() {
         case 'message':
           if (event.message) {
             addMessage(event.message as ChatMessage);
+          }
+          break;
+        case 'message_delta':
+          if (event.delta) {
+            const d = event.delta as { messageId: string; senderId: string; content: string };
+            applyDelta(event.conversationId!, d.messageId, d.senderId, d.content);
+          }
+          break;
+        case 'message_done':
+          if (event.messageId) {
+            finalizeStreamingMessage(event.messageId, (event as any).message as ChatMessage | undefined);
+          }
+          break;
+        case 'typing':
+          if (event.conversationId && event.participantId) {
+            setTyping(event.conversationId, event.participantId, (event.activity as string) ?? 'typing');
           }
           break;
         case 'error':
@@ -105,8 +126,6 @@ export default function ChatPage() {
               key={c.id}
               conv={c}
               active={c.id === activeConversationId}
-              currentUserId={user?.id ?? ''}
-              participantCache={participantCache}
               onClick={() => setActiveConversation(c.id)}
             />
           ))}
@@ -122,13 +141,14 @@ export default function ChatPage() {
           <>
             <ChatHeader
               conv={conversations.find((c) => c.id === activeConversationId)}
-              currentUserId={user?.id ?? ''}
-              participantCache={participantCache}
             />
             <MessageList
               messages={activeMessages}
+              conversationId={activeConversationId}
               currentUserId={user?.id ?? ''}
               participantCache={participantCache}
+              streamingMessages={streamingMessages}
+              typingStates={typingStates}
             />
             <MessageInput conversationId={activeConversationId} />
           </>
@@ -149,14 +169,10 @@ export default function ChatPage() {
 function ConversationItem({
   conv,
   active,
-  currentUserId,
-  participantCache,
   onClick,
 }: {
   conv: ConversationInfo;
   active: boolean;
-  currentUserId: string;
-  participantCache: Map<string, any>;
   onClick: () => void;
 }) {
   // Try to show the other participant's name for direct chats
@@ -173,12 +189,8 @@ function ConversationItem({
 
 function ChatHeader({
   conv,
-  currentUserId,
-  participantCache,
 }: {
   conv?: ConversationInfo;
-  currentUserId: string;
-  participantCache: Map<string, any>;
 }) {
   return (
     <div className="chat-header">
@@ -189,27 +201,42 @@ function ChatHeader({
 
 function MessageList({
   messages,
+  conversationId,
   currentUserId,
   participantCache,
+  streamingMessages,
+  typingStates,
 }: {
   messages: ChatMessage[];
+  conversationId: string;
   currentUserId: string;
   participantCache: Map<string, any>;
+  streamingMessages: Map<string, any>;
+  typingStates: Map<string, any>;
 }) {
   const bottomRef = useRef<HTMLDivElement>(null);
+  const streaming = getStreamingMessages(conversationId);
+  const typing = getTypingStates(conversationId);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages.length]);
+  }, [messages.length, streaming.length, typing.length]);
 
   return (
     <div className="message-list">
+      {/* Completed messages */}
       {messages.map((m) => {
         const isOwn = m.senderId === currentUserId;
         const senderName = participantCache.get(m.senderId)?.displayName ?? m.senderId.slice(0, 8);
+        const isAgent = participantCache.get(m.senderId)?.type === 'agent';
         return (
           <div key={m.id} className={`message-row ${isOwn ? 'own' : 'other'}`}>
-            {!isOwn && <div className="message-sender">{senderName}</div>}
+            {!isOwn && (
+              <div className="message-sender">
+                {senderName}
+                {isAgent && <span className="agent-badge">agent</span>}
+              </div>
+            )}
             <div className={`message-bubble ${isOwn ? 'own' : 'other'}`}>
               {m.content}
             </div>
@@ -219,6 +246,43 @@ function MessageList({
           </div>
         );
       })}
+
+      {/* Streaming messages (in-progress) */}
+      {streaming.map((sm) => {
+        const senderName = participantCache.get(sm.senderId)?.displayName ?? sm.senderId.slice(0, 8);
+        const isAgent = participantCache.get(sm.senderId)?.type === 'agent';
+        return (
+          <div key={`stream-${sm.id}`} className="message-row other">
+            <div className="message-sender">
+              {senderName}
+              {isAgent && <span className="agent-badge">agent</span>}
+            </div>
+            <div className="message-bubble other streaming">
+              {sm.content}
+              <span className="streaming-cursor" />
+            </div>
+          </div>
+        );
+      })}
+
+      {/* Typing indicators */}
+      {typing.length > 0 && (
+        <div className="typing-indicator">
+          {typing.map((t) => {
+            const name = participantCache.get(t.participantId)?.displayName ?? '...';
+            const activityLabel = t.activity === 'thinking' ? 'thinking'
+              : t.activity === 'tool_calling' ? 'using tools'
+              : 'typing';
+            return (
+              <span key={t.participantId} className="typing-entry">
+                {name} is {activityLabel}
+              </span>
+            );
+          })}
+          <span className="typing-dots"><span>.</span><span>.</span><span>.</span></span>
+        </div>
+      )}
+
       <div ref={bottomRef} />
     </div>
   );
@@ -273,10 +337,26 @@ function NewConversationButton({
   const [targetName, setTargetName] = useState('');
   const [error, setError] = useState('');
 
+  // Refresh participant cache every time the form opens
+  useEffect(() => {
+    if (open) {
+      listParticipants()
+        .then((ps) => cacheParticipants(ps))
+        .catch(() => {});
+    }
+  }, [open]);
+
   const handleCreate = async () => {
     setError('');
+    // Refresh cache before lookup to catch recently registered agents
+    let allParticipants = Array.from(participantCache.values());
+    try {
+      const fresh = await listParticipants();
+      cacheParticipants(fresh);
+      allParticipants = fresh; // use fresh data directly (closure captures stale prop)
+    } catch { /* use stale cache as fallback */ }
+
     // Find the target participant
-    const allParticipants = Array.from(participantCache.values());
     const target = allParticipants.find(
       (p) => p.name === targetName || p.displayName === targetName
     );

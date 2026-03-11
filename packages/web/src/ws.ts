@@ -21,20 +21,21 @@ export function connectWs(token: string): void {
 
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   const url = `${protocol}//${window.location.host}/ws?token=${encodeURIComponent(token)}`;
-  socket = new WebSocket(url);
+  const ws = new WebSocket(url);
+  socket = ws;
 
-  socket.onopen = () => {
+  ws.onopen = () => {
     console.log('[ws] connected');
-    // Flush pending events
+    // Flush pending events — use local `ws` ref (safe across HMR)
     const queued = pendingEvents.splice(0);
     for (const ev of queued) {
-      socket!.send(JSON.stringify(ev));
+      ws.send(JSON.stringify(ev));
     }
     // Notify connect handlers
     for (const h of connectHandlers) h();
   };
 
-  socket.onmessage = (ev) => {
+  ws.onmessage = (ev) => {
     try {
       const event = JSON.parse(ev.data);
       for (const h of handlers) h(event);
@@ -43,16 +44,17 @@ export function connectWs(token: string): void {
     }
   };
 
-  socket.onclose = (ev) => {
+  ws.onclose = (ev) => {
     console.log('[ws] closed:', ev.code, ev.reason);
-    socket = null;
+    // Only clear if this is still the active socket (prevents HMR race)
+    if (socket === ws) socket = null;
     // Auto-reconnect unless auth failure
     if (ev.code !== 4001 && currentToken) {
       reconnectTimer = setTimeout(() => connectWs(currentToken!), 2000);
     }
   };
 
-  socket.onerror = (err) => {
+  ws.onerror = (err) => {
     console.error('[ws] error:', err);
   };
 }

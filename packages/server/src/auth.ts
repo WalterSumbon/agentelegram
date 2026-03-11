@@ -1,9 +1,10 @@
 /**
- * Authentication routes — register & login for human participants.
+ * Authentication routes — register & login for human participants + agent registration.
  */
 import { Router } from 'express';
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
+import { randomBytes } from 'node:crypto';
 import { getPool } from './db.js';
 
 export const JWT_SECRET = process.env.JWT_SECRET ?? 'agentelegram-dev-secret';
@@ -147,3 +148,74 @@ authRouter.get('/me', async (req, res) => {
     res.status(401).json({ error: 'invalid token' });
   }
 });
+
+/**
+ * POST /api/auth/register-agent
+ * Body: { name, displayName }
+ * Returns: { participant, apiKey }
+ *
+ * The raw API key is returned ONCE — it cannot be retrieved later.
+ * The server stores only a bcrypt hash of the key.
+ */
+authRouter.post('/register-agent', async (req, res) => {
+  const { name, displayName } = req.body;
+
+  if (!name || !displayName) {
+    res.status(400).json({ error: 'name and displayName are required' });
+    return;
+  }
+
+  const db = getPool();
+
+  const existing = await db.query('SELECT id FROM participants WHERE name = $1', [name]);
+  if (existing.rows.length > 0) {
+    res.status(409).json({ error: 'name already taken' });
+    return;
+  }
+
+  // Generate a random API key: ag-<32 hex chars>
+  const apiKey = `ag-${randomBytes(16).toString('hex')}`;
+  const authHash = await bcrypt.hash(apiKey, SALT_ROUNDS);
+
+  const result = await db.query(
+    `INSERT INTO participants (type, name, display_name, auth_hash)
+     VALUES ('agent', $1, $2, $3)
+     RETURNING id, type, name, display_name, avatar_url, created_at`,
+    [name, displayName, authHash]
+  );
+
+  const row = result.rows[0];
+  const participant = {
+    id: row.id,
+    type: row.type,
+    name: row.name,
+    displayName: row.display_name,
+    avatarUrl: row.avatar_url,
+    createdAt: Number(row.created_at),
+  };
+
+  // Return raw API key — only time it's visible
+  res.status(201).json({ participant, apiKey });
+});
+
+/**
+ * Verify an API key against the database.
+ * Returns the auth payload if valid, null otherwise.
+ */
+export async function verifyApiKey(apiKey: string): Promise<{ sub: string; name: string; type: string } | null> {
+  const db = getPool();
+
+  // API keys start with "ag-", look up all agent participants
+  // For efficiency we could add a key prefix column, but for now iterate
+  const result = await db.query(
+    `SELECT id, name, type, auth_hash FROM participants WHERE type = 'agent'`
+  );
+
+  for (const row of result.rows) {
+    const valid = await bcrypt.compare(apiKey, row.auth_hash);
+    if (valid) {
+      return { sub: row.id, name: row.name, type: row.type };
+    }
+  }
+  return null;
+}

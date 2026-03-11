@@ -1,13 +1,16 @@
 /**
  * WebSocket chat protocol handler.
  *
- * Authenticates connections via JWT (query param `token`),
- * then handles the unified chat protocol events.
+ * Authenticates connections via:
+ *   - JWT token (query param `token`) — for humans
+ *   - API key (query param `apikey`) — for agents
+ *
+ * Then handles the unified chat protocol events.
  */
 import type { WebSocket, WebSocketServer } from 'ws';
 import type { IncomingMessage } from 'node:http';
 import jwt from 'jsonwebtoken';
-import { JWT_SECRET } from './auth.js';
+import { JWT_SECRET, verifyApiKey } from './auth.js';
 import { getPool } from './db.js';
 import type { ClientEvent, ServerEvent } from '@agentelegram/shared';
 
@@ -21,29 +24,57 @@ interface AuthPayload {
 const connections = new Map<string, Set<WebSocket>>();
 
 /**
+ * In-progress streaming messages: messageId → accumulated state.
+ * When an agent sends deltas, we accumulate content here until send_message_done.
+ */
+interface StreamingMessage {
+  messageId: string;
+  conversationId: string;
+  senderId: string;
+  content: string;      // accumulated content so far
+  contentType: string;
+  startedAt: number;
+}
+const streamingMessages = new Map<string, StreamingMessage>();
+
+/**
  * Set up WebSocket server event handling.
  */
 export function setupWsHandler(wss: WebSocketServer): void {
-  wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
+  wss.on('connection', async (ws: WebSocket, req: IncomingMessage) => {
     const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
     const token = url.searchParams.get('token');
+    const apikey = url.searchParams.get('apikey');
 
-    if (!token) {
-      sendEvent(ws, { type: 'error', error: { code: 'AUTH_REQUIRED', message: 'missing token' } });
-      ws.close(4001, 'missing token');
+    if (!token && !apikey) {
+      sendEvent(ws, { type: 'error', error: { code: 'AUTH_REQUIRED', message: 'missing token or apikey' } });
+      ws.close(4001, 'missing credentials');
       return;
     }
 
     let auth: AuthPayload;
-    try {
-      auth = jwt.verify(token, JWT_SECRET) as AuthPayload;
-    } catch {
-      sendEvent(ws, { type: 'error', error: { code: 'AUTH_FAILED', message: 'invalid token' } });
-      ws.close(4001, 'invalid token');
-      return;
+
+    if (token) {
+      // JWT auth (human)
+      try {
+        auth = jwt.verify(token, JWT_SECRET) as AuthPayload;
+      } catch {
+        sendEvent(ws, { type: 'error', error: { code: 'AUTH_FAILED', message: 'invalid token' } });
+        ws.close(4001, 'invalid token');
+        return;
+      }
+    } else {
+      // API key auth (agent)
+      const result = await verifyApiKey(apikey!);
+      if (!result) {
+        sendEvent(ws, { type: 'error', error: { code: 'AUTH_FAILED', message: 'invalid api key' } });
+        ws.close(4001, 'invalid api key');
+        return;
+      }
+      auth = result;
     }
 
-    console.log(`[ws] authenticated: ${auth.name} (${auth.sub})`);
+    console.log(`[ws] authenticated: ${auth.name} (${auth.type}, ${auth.sub})`);
 
     // Register connection
     if (!connections.has(auth.sub)) {
@@ -61,12 +92,32 @@ export function setupWsHandler(wss: WebSocketServer): void {
       }
     });
 
-    ws.on('close', () => {
+    ws.on('close', async () => {
       console.log(`[ws] disconnected: ${auth.name}`);
       const set = connections.get(auth.sub);
       if (set) {
         set.delete(ws);
         if (set.size === 0) connections.delete(auth.sub);
+      }
+
+      // Clean up orphaned streaming messages from this participant.
+      // If agent disconnects mid-stream, persist partial content or delete empty rows.
+      for (const [msgId, streaming] of streamingMessages.entries()) {
+        if (streaming.senderId !== auth.sub) continue;
+        streamingMessages.delete(msgId);
+        console.log(`[ws] cleaning up orphaned stream: ${msgId} from ${auth.name}`);
+        try {
+          const db = getPool();
+          if (streaming.content.length > 0) {
+            // Persist partial content so it's not lost
+            await db.query(`UPDATE messages SET content = $1 WHERE id = $2`, [streaming.content, msgId]);
+          } else {
+            // Empty message row — delete it
+            await db.query(`DELETE FROM messages WHERE id = $1`, [msgId]);
+          }
+        } catch (err) {
+          console.error(`[ws] failed to clean up stream ${msgId}:`, err);
+        }
       }
     });
   });
@@ -84,6 +135,10 @@ async function handleClientEvent(ws: WebSocket, auth: AuthPayload, event: Client
       return handleListConversations(ws, auth);
     case 'send_message':
       return handleSendMessage(ws, auth, event);
+    case 'send_message_delta':
+      return handleSendMessageDelta(ws, auth, event);
+    case 'send_message_done':
+      return handleSendMessageDone(ws, auth, event);
     case 'get_history':
       return handleGetHistory(ws, auth, event);
     case 'typing':
@@ -135,10 +190,7 @@ async function handleCreateConversation(ws: WebSocket, auth: AuthPayload, event:
     updatedAt: Number(conv.updated_at),
   };
 
-  // Notify all participants in this conversation
-  const notifyEvent: ServerEvent = { type: 'conversation_created', conversationId: conv.id };
-  // Attach conversation data (we extend the event inline for simplicity)
-  const fullEvent = { ...notifyEvent, conversation };
+  const fullEvent = { type: 'conversation_created' as const, conversationId: conv.id, conversation };
   for (const pid of participantIds) {
     broadcastToParticipant(pid, fullEvent);
   }
@@ -172,7 +224,7 @@ async function handleListConversations(ws: WebSocket, auth: AuthPayload): Promis
 }
 
 /**
- * send_message — persist message and fan-out to conversation participants.
+ * send_message — persist complete message and fan-out.
  */
 async function handleSendMessage(ws: WebSocket, auth: AuthPayload, event: ClientEvent): Promise<void> {
   if (!event.conversationId || !event.content) {
@@ -182,7 +234,7 @@ async function handleSendMessage(ws: WebSocket, auth: AuthPayload, event: Client
 
   const db = getPool();
 
-  // Verify sender is a member of this conversation
+  // Verify sender is a member
   const memberCheck = await db.query(
     `SELECT 1 FROM conversation_participants WHERE conversation_id = $1 AND participant_id = $2`,
     [event.conversationId, auth.sub]
@@ -201,7 +253,6 @@ async function handleSendMessage(ws: WebSocket, auth: AuthPayload, event: Client
   );
   const row = msgResult.rows[0];
 
-  // Update conversation updated_at
   await db.query(
     `UPDATE conversations SET updated_at = $1 WHERE id = $2`,
     [row.timestamp, event.conversationId]
@@ -216,7 +267,7 @@ async function handleSendMessage(ws: WebSocket, auth: AuthPayload, event: Client
     timestamp: Number(row.timestamp),
   };
 
-  // Fan-out to all participants in the conversation
+  // Fan-out
   const participants = await db.query(
     `SELECT participant_id FROM conversation_participants WHERE conversation_id = $1`,
     [event.conversationId]
@@ -225,6 +276,154 @@ async function handleSendMessage(ws: WebSocket, auth: AuthPayload, event: Client
   const serverEvent: ServerEvent = { type: 'message', conversationId: event.conversationId, message };
   for (const p of participants.rows) {
     broadcastToParticipant(p.participant_id, serverEvent);
+  }
+}
+
+/**
+ * send_message_delta — streaming chunk from a participant (typically agent).
+ *
+ * First delta (no messageId): server allocates a message row, returns delta_ack with assignedMessageId.
+ * Subsequent deltas (with messageId): server accumulates content and forwards to other participants.
+ */
+async function handleSendMessageDelta(ws: WebSocket, auth: AuthPayload, event: ClientEvent): Promise<void> {
+  if (!event.conversationId || event.delta === undefined) {
+    sendEvent(ws, { type: 'error', error: { code: 'BAD_REQUEST', message: 'conversationId and delta required' } });
+    return;
+  }
+
+  const db = getPool();
+  let messageId = event.messageId;
+
+  if (!messageId) {
+    // First delta — allocate a message row with empty content (will be updated on done)
+    const memberCheck = await db.query(
+      `SELECT 1 FROM conversation_participants WHERE conversation_id = $1 AND participant_id = $2`,
+      [event.conversationId, auth.sub]
+    );
+    if (memberCheck.rows.length === 0) {
+      sendEvent(ws, { type: 'error', error: { code: 'FORBIDDEN', message: 'not a member of this conversation' } });
+      return;
+    }
+
+    const msgResult = await db.query(
+      `INSERT INTO messages (conversation_id, sender_id, content, content_type)
+       VALUES ($1, $2, '', 'text')
+       RETURNING id, timestamp`,
+      [event.conversationId, auth.sub]
+    );
+    messageId = msgResult.rows[0].id;
+
+    // Initialize streaming state
+    streamingMessages.set(messageId, {
+      messageId,
+      conversationId: event.conversationId,
+      senderId: auth.sub,
+      content: event.delta,
+      contentType: 'text',
+      startedAt: Number(msgResult.rows[0].timestamp),
+    });
+
+    // Ack with the assigned message ID
+    sendEvent(ws, { type: 'delta_ack', assignedMessageId: messageId, conversationId: event.conversationId });
+  } else {
+    // Subsequent delta — accumulate
+    const streaming = streamingMessages.get(messageId);
+    if (!streaming) {
+      sendEvent(ws, { type: 'error', error: { code: 'NOT_FOUND', message: 'no streaming message found for this messageId' } });
+      return;
+    }
+    if (streaming.senderId !== auth.sub) {
+      sendEvent(ws, { type: 'error', error: { code: 'FORBIDDEN', message: 'cannot append to another participant\'s stream' } });
+      return;
+    }
+    streaming.content += event.delta;
+  }
+
+  // Forward delta to other participants in the conversation
+  const participants = await db.query(
+    `SELECT participant_id FROM conversation_participants WHERE conversation_id = $1`,
+    [event.conversationId]
+  );
+
+  const deltaEvent: ServerEvent = {
+    type: 'message_delta',
+    conversationId: event.conversationId,
+    delta: {
+      messageId: messageId!,
+      senderId: auth.sub,
+      content: event.delta,
+    },
+  };
+
+  for (const p of participants.rows) {
+    if (p.participant_id !== auth.sub) {
+      broadcastToParticipant(p.participant_id, deltaEvent);
+    }
+  }
+}
+
+/**
+ * send_message_done — streaming complete.
+ * Persist the accumulated content and broadcast message_done + final message.
+ */
+async function handleSendMessageDone(ws: WebSocket, auth: AuthPayload, event: ClientEvent): Promise<void> {
+  const messageId = event.messageId;
+  if (!messageId) {
+    sendEvent(ws, { type: 'error', error: { code: 'BAD_REQUEST', message: 'messageId required for send_message_done' } });
+    return;
+  }
+
+  const streaming = streamingMessages.get(messageId);
+  if (!streaming) {
+    sendEvent(ws, { type: 'error', error: { code: 'NOT_FOUND', message: 'no streaming message found' } });
+    return;
+  }
+  if (streaming.senderId !== auth.sub) {
+    sendEvent(ws, { type: 'error', error: { code: 'FORBIDDEN', message: 'cannot finalize another participant\'s stream' } });
+    return;
+  }
+
+  streamingMessages.delete(messageId);
+
+  const db = getPool();
+
+  // Persist final content
+  const result = await db.query(
+    `UPDATE messages SET content = $1 WHERE id = $2 RETURNING timestamp`,
+    [streaming.content, messageId]
+  );
+  const timestamp = Number(result.rows[0].timestamp);
+
+  // Update conversation updated_at
+  await db.query(
+    `UPDATE conversations SET updated_at = $1 WHERE id = $2`,
+    [timestamp, streaming.conversationId]
+  );
+
+  const finalMessage = {
+    id: messageId,
+    conversationId: streaming.conversationId,
+    senderId: streaming.senderId,
+    content: streaming.content,
+    contentType: streaming.contentType,
+    timestamp,
+  };
+
+  // Broadcast message_done + full message to all participants
+  const participants = await db.query(
+    `SELECT participant_id FROM conversation_participants WHERE conversation_id = $1`,
+    [streaming.conversationId]
+  );
+
+  const doneEvent = {
+    type: 'message_done' as const,
+    conversationId: streaming.conversationId,
+    messageId,
+    message: finalMessage,
+  };
+
+  for (const p of participants.rows) {
+    broadcastToParticipant(p.participant_id, doneEvent);
   }
 }
 
