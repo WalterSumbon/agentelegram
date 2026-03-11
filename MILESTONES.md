@@ -4,19 +4,20 @@
 
 ---
 
-## M0：项目脚手架
-- [ ] Monorepo 搭建（server / web / shared）
-- [ ] PostgreSQL 连接 + schema 初始化
-- [ ] 开发工具链（TypeScript、Vite、dev script）
-- **验收**：`npm run dev` 前后端都能跑起来，DB 表已建好
+## M0：项目脚手架 ✅
+- [x] Monorepo 搭建（server / web / shared）
+- [x] PostgreSQL 连接 + schema 初始化
+- [x] 开发工具链（TypeScript、Vite、dev script）
+- **验收**：`npm run dev` 前后端都能跑起来，DB 表已建好 ✅
 
-## M1：核心聊天 MVP
-- [ ] WebSocket 连接 + JWT 认证
-- [ ] 人类注册/登录
-- [ ] 1:1 会话：创建、发消息、收消息
-- [ ] 消息持久化（append-only）
-- [ ] 基础前端：登录页、会话列表、聊天界面
-- **验收**：一个人类用户能登录、创建会话、发消息并在页面上看到
+## M1：核心聊天 MVP ✅
+- [x] WebSocket 连接 + JWT 认证
+- [x] 人类注册/登录
+- [x] 1:1 会话：创建、发消息、收消息
+- [x] 消息持久化（append-only）
+- [x] 基础前端：登录页、会话列表、聊天界面
+- [x] 实时消息推送（WebSocket fan-out，跨用户即时可见）
+- **验收**：一个人类用户能登录、创建会话、发消息并在页面上看到 ✅
 
 ## M2：Agent 接入
 - [ ] Agent 用同一套 WebSocket 协议连接（API key 认证）
