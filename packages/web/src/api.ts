@@ -4,10 +4,20 @@
 
 const API_BASE = '/api';
 
+/** Get stored JWT for authenticated API calls */
+function getToken(): string | null {
+  return localStorage.getItem('token');
+}
+
+function authHeaders(): Record<string, string> {
+  const token = getToken();
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
 export interface AuthResponse {
   participant: {
     id: string;
-    type: string;
+    type: 'human' | 'agent';
     name: string;
     displayName: string;
     avatarUrl?: string;
@@ -51,13 +61,17 @@ export async function getMe(token: string) {
 }
 
 export async function listParticipants(): Promise<AuthResponse['participant'][]> {
-  const res = await fetch(`${API_BASE}/participants`);
+  const res = await fetch(`${API_BASE}/participants`, {
+    headers: authHeaders(),
+  });
   if (!res.ok) throw new Error('failed to fetch participants');
   return res.json();
 }
 
 export async function getConversationMembers(conversationId: string): Promise<AuthResponse['participant'][]> {
-  const res = await fetch(`${API_BASE}/conversations/${conversationId}/members`);
+  const res = await fetch(`${API_BASE}/conversations/${conversationId}/members`, {
+    headers: authHeaders(),
+  });
   if (!res.ok) throw new Error('failed to fetch members');
   return res.json();
 }

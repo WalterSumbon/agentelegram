@@ -13,8 +13,11 @@ import {
   getStreamingMessages,
   setTyping,
   getTypingStates,
+  setConversationMembers,
+  getConversationMembersList,
   type ConversationInfo,
   type ChatMessage,
+  type User,
 } from '../store';
 import { connectWs, disconnectWs, sendWsEvent, onWsEvent, onWsConnect } from '../ws';
 import { listParticipants, getConversationMembers } from '../api';
@@ -82,7 +85,7 @@ export default function ChatPage() {
     // Load all participants for display names
     listParticipants()
       .then((ps) => cacheParticipants(ps))
-      .catch(() => {});
+      .catch((err) => console.error('[chat]', err));
 
     return () => {
       unsub();
@@ -91,20 +94,25 @@ export default function ChatPage() {
     };
   }, [token]);
 
-  // When active conversation changes, load history
+  // When active conversation changes, load history + members
   useEffect(() => {
     if (!activeConversationId) return;
     sendWsEvent({ type: 'get_history', conversationId: activeConversationId, limit: 50 });
 
-    // Load members for display names
+    // Load members for display names and group header
     getConversationMembers(activeConversationId)
-      .then((members) => cacheParticipants(members))
-      .catch(() => {});
+      .then((members) => {
+        cacheParticipants(members);
+        setConversationMembers(activeConversationId, members);
+      })
+      .catch((err) => console.error('[chat]', err));
   }, [activeConversationId]);
 
   const activeMessages = activeConversationId
     ? messages.get(activeConversationId) ?? []
     : [];
+
+  const activeConv = conversations.find((c) => c.id === activeConversationId);
 
   return (
     <div className="chat-layout">
@@ -127,6 +135,8 @@ export default function ChatPage() {
               conv={c}
               active={c.id === activeConversationId}
               onClick={() => setActiveConversation(c.id)}
+              participantCache={participantCache}
+              currentUserId={user?.id ?? ''}
             />
           ))}
           {conversations.length === 0 && (
@@ -140,7 +150,10 @@ export default function ChatPage() {
         {activeConversationId ? (
           <>
             <ChatHeader
-              conv={conversations.find((c) => c.id === activeConversationId)}
+              conv={activeConv}
+              conversationId={activeConversationId}
+              currentUserId={user?.id ?? ''}
+              participantCache={participantCache}
             />
             <MessageList
               messages={activeMessages}
@@ -170,16 +183,35 @@ function ConversationItem({
   conv,
   active,
   onClick,
+  participantCache,
+  currentUserId,
 }: {
   conv: ConversationInfo;
   active: boolean;
   onClick: () => void;
+  participantCache: Map<string, User>;
+  currentUserId: string;
 }) {
-  // Try to show the other participant's name for direct chats
-  const label = conv.title || conv.label || 'Chat';
+  const isGroup = conv.type === 'group';
+  const members = getConversationMembersList(conv.id);
+  const otherMembers = members.filter((m) => m.id !== currentUserId);
+
+  // Label: title if set, else member names
+  let label = conv.title || conv.label;
+  if (!label && otherMembers.length > 0) {
+    label = otherMembers.map((m) => m.displayName).join(', ');
+  }
+  if (!label) label = 'Chat';
+
   return (
     <div className={`conv-item ${active ? 'active' : ''}`} onClick={onClick}>
-      <div className="conv-label">{label}</div>
+      <div className="conv-item-header">
+        {isGroup && <span className="group-icon" title="Group chat">👥</span>}
+        <div className="conv-label">{label}</div>
+        {isGroup && members.length > 0 && (
+          <span className="member-count">{members.length}</span>
+        )}
+      </div>
       {conv.lastMessage && (
         <div className="conv-preview">{conv.lastMessage}</div>
       )}
@@ -189,12 +221,42 @@ function ConversationItem({
 
 function ChatHeader({
   conv,
+  conversationId,
+  currentUserId,
+  participantCache,
 }: {
   conv?: ConversationInfo;
+  conversationId: string;
+  currentUserId: string;
+  participantCache: Map<string, User>;
 }) {
+  const members = getConversationMembersList(conversationId);
+  const otherMembers = members.filter((m) => m.id !== currentUserId);
+  const isGroup = conv?.type === 'group';
+
+  let title = conv?.title;
+  if (!title && otherMembers.length > 0) {
+    title = otherMembers.map((m) => m.displayName).join(', ');
+  }
+  if (!title) title = 'Chat';
+
   return (
     <div className="chat-header">
-      <h2>{conv?.title || 'Chat'}</h2>
+      <div className="chat-header-top">
+        {isGroup && <span className="group-icon">👥</span>}
+        <h2>{title}</h2>
+      </div>
+      {isGroup && members.length > 0 && (
+        <div className="chat-header-members">
+          {members.map((m) => (
+            <span key={m.id} className={`member-chip ${m.type === 'agent' ? 'agent' : ''}`}>
+              <span className="member-avatar">{m.displayName.charAt(0)}</span>
+              {m.displayName}
+              {m.type === 'agent' && <span className="agent-dot" />}
+            </span>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -334,7 +396,8 @@ function NewConversationButton({
 }) {
   const [open, setOpen] = useState(false);
   const [title, setTitle] = useState('');
-  const [targetName, setTargetName] = useState('');
+  const [search, setSearch] = useState('');
+  const [selected, setSelected] = useState<User[]>([]);
   const [error, setError] = useState('');
 
   // Refresh participant cache every time the form opens
@@ -342,44 +405,61 @@ function NewConversationButton({
     if (open) {
       listParticipants()
         .then((ps) => cacheParticipants(ps))
-        .catch(() => {});
+        .catch((err) => console.error('[chat]', err));
+      // Reset form state
+      setTitle('');
+      setSearch('');
+      setSelected([]);
+      setError('');
     }
   }, [open]);
 
-  const handleCreate = async () => {
+  // Available participants: everyone except current user and already selected
+  const allParticipants = Array.from(participantCache.values()) as User[];
+  const available = allParticipants.filter(
+    (p) => p.id !== currentUserId && !selected.find((s) => s.id === p.id)
+  );
+  const filtered = search
+    ? available.filter(
+        (p) =>
+          p.name.toLowerCase().includes(search.toLowerCase()) ||
+          p.displayName.toLowerCase().includes(search.toLowerCase())
+      )
+    : available;
+
+  const toggleSelect = (p: User) => {
+    if (selected.find((s) => s.id === p.id)) {
+      setSelected(selected.filter((s) => s.id !== p.id));
+    } else {
+      setSelected([...selected, p]);
+    }
+    setSearch('');
+  };
+
+  const removeSelected = (id: string) => {
+    setSelected(selected.filter((s) => s.id !== id));
+  };
+
+  const handleCreate = () => {
     setError('');
-    // Refresh cache before lookup to catch recently registered agents
-    let allParticipants = Array.from(participantCache.values());
-    try {
-      const fresh = await listParticipants();
-      cacheParticipants(fresh);
-      allParticipants = fresh; // use fresh data directly (closure captures stale prop)
-    } catch { /* use stale cache as fallback */ }
-
-    // Find the target participant
-    const target = allParticipants.find(
-      (p) => p.name === targetName || p.displayName === targetName
-    );
-
-    if (!target) {
-      setError(`User "${targetName}" not found`);
+    if (selected.length === 0) {
+      setError('Select at least one participant');
       return;
     }
 
-    if (target.id === currentUserId) {
-      setError("Can't chat with yourself");
-      return;
-    }
+    const participantIds = [currentUserId, ...selected.map((s) => s.id)];
+    const isGroup = selected.length > 1;
+    const defaultTitle = isGroup
+      ? selected.map((s) => s.displayName).join(', ')
+      : `Chat with ${selected[0].displayName}`;
 
     sendWsEvent({
       type: 'create_conversation',
-      title: title || `Chat with ${target.displayName}`,
-      participantIds: [currentUserId, target.id],
+      title: title || defaultTitle,
+      participantIds,
     });
 
     setOpen(false);
-    setTitle('');
-    setTargetName('');
   };
 
   if (!open) {
@@ -392,22 +472,63 @@ function NewConversationButton({
 
   return (
     <div className="new-chat-form">
+      {/* Selected participants chips */}
+      {selected.length > 0 && (
+        <div className="selected-chips">
+          {selected.map((p) => (
+            <span key={p.id} className={`chip ${p.type === 'agent' ? 'agent' : ''}`}>
+              {p.displayName}
+              {p.type === 'agent' && <span className="agent-dot" />}
+              <button className="chip-remove" onClick={() => removeSelected(p.id)}>×</button>
+            </span>
+          ))}
+        </div>
+      )}
+
+      {/* Search input */}
       <input
         type="text"
-        placeholder="Username to chat with"
-        value={targetName}
-        onChange={(e) => setTargetName(e.target.value)}
+        placeholder={selected.length === 0 ? 'Search participants...' : 'Add more...'}
+        value={search}
+        onChange={(e) => setSearch(e.target.value)}
         autoFocus
       />
-      <input
-        type="text"
-        placeholder="Chat title (optional)"
-        value={title}
-        onChange={(e) => setTitle(e.target.value)}
-      />
+
+      {/* Available participants list */}
+      <div className="participant-list">
+        {filtered.length === 0 && (
+          <div className="participant-empty">
+            {search ? 'No matches' : 'No more participants'}
+          </div>
+        )}
+        {filtered.slice(0, 10).map((p) => (
+          <div key={p.id} className="participant-option" onClick={() => toggleSelect(p)}>
+            <span className={`participant-avatar ${p.type === 'agent' ? 'agent' : ''}`}>
+              {p.displayName.charAt(0)}
+            </span>
+            <div className="participant-info">
+              <span className="participant-name">{p.displayName}</span>
+              <span className="participant-type">@{p.name} · {p.type}</span>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* Title input (shown when creating group) */}
+      {selected.length > 1 && (
+        <input
+          type="text"
+          placeholder="Group title (optional)"
+          value={title}
+          onChange={(e) => setTitle(e.target.value)}
+        />
+      )}
+
       {error && <div className="error-msg">{error}</div>}
       <div className="form-actions">
-        <button className="btn-primary" onClick={handleCreate}>Create</button>
+        <button className="btn-primary" onClick={handleCreate} disabled={selected.length === 0}>
+          {selected.length > 1 ? 'Create Group' : 'Create Chat'}
+        </button>
         <button className="btn-secondary" onClick={() => setOpen(false)}>Cancel</button>
       </div>
     </div>

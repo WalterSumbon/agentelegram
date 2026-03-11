@@ -67,15 +67,20 @@ export async function initDb(): Promise<void> {
 
     CREATE INDEX IF NOT EXISTS idx_conversation_participants_participant
       ON conversation_participants (participant_id);
+  `);
 
-    CREATE INDEX IF NOT EXISTS idx_participants_key_prefix
-      ON participants (key_prefix) WHERE key_prefix IS NOT NULL;
-
-    -- Migration: add key_prefix column if missing (existing databases)
+  // Migration: add key_prefix column if missing (existing databases created before M2 fix)
+  await db.query(`
     DO $$ BEGIN
       ALTER TABLE participants ADD COLUMN IF NOT EXISTS key_prefix TEXT;
     EXCEPTION WHEN duplicate_column THEN NULL;
     END $$;
+  `);
+
+  // Index on key_prefix (must run after migration ensures column exists)
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS idx_participants_key_prefix
+      ON participants (key_prefix) WHERE key_prefix IS NOT NULL;
   `);
 
   console.log('[db] schema initialized');

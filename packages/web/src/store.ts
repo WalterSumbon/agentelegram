@@ -11,7 +11,7 @@ import { useSyncExternalStore } from 'react';
 
 export interface User {
   id: string;
-  type: string;
+  type: 'human' | 'agent';
   name: string;
   displayName: string;
   avatarUrl?: string;
@@ -20,7 +20,7 @@ export interface User {
 export interface ConversationInfo {
   id: string;
   title?: string;
-  type: string;
+  type: 'direct' | 'group';
   createdBy: string;
   createdAt: number;
   updatedAt: number;
@@ -67,6 +67,8 @@ interface AppState {
   typingStates: Map<string, TypingState[]>;
   /** participant id → display info */
   participantCache: Map<string, User>;
+  /** conversationId → member list (for group display) */
+  conversationMembers: Map<string, User[]>;
 }
 
 // ---------------------------------------------------------------------------
@@ -82,6 +84,7 @@ let state: AppState = {
   streamingMessages: new Map(),
   typingStates: new Map(),
   participantCache: new Map(),
+  conversationMembers: new Map(),
 };
 
 let listeners: (() => void)[] = [];
@@ -126,6 +129,7 @@ export function clearAuth() {
   state.messages = new Map();
   state.streamingMessages = new Map();
   state.typingStates = new Map();
+  state.conversationMembers = new Map();
   localStorage.removeItem('token');
   localStorage.removeItem('user');
   emit();
@@ -205,6 +209,16 @@ export function cacheParticipants(participants: User[]) {
 
 export function getParticipantName(id: string): string {
   return state.participantCache.get(id)?.displayName ?? id.slice(0, 8);
+}
+
+export function setConversationMembers(conversationId: string, members: User[]) {
+  state.conversationMembers = new Map(state.conversationMembers);
+  state.conversationMembers.set(conversationId, members);
+  emit();
+}
+
+export function getConversationMembersList(conversationId: string): User[] {
+  return state.conversationMembers.get(conversationId) ?? [];
 }
 
 // ---------------------------------------------------------------------------

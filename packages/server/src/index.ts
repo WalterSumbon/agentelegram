@@ -10,7 +10,7 @@ import cors from 'cors';
 import { createServer } from 'node:http';
 import { WebSocketServer } from 'ws';
 import { initDb, closeDb, getPool } from './db.js';
-import { authRouter } from './auth.js';
+import { authRouter, requireAuth } from './auth.js';
 import { setupWsHandler } from './ws-handler.js';
 
 const PORT = parseInt(process.env.PORT ?? '4000', 10);
@@ -31,8 +31,8 @@ async function main(): Promise<void> {
   // Auth routes
   app.use('/api/auth', authRouter);
 
-  // REST: list all participants (for creating conversations)
-  app.get('/api/participants', async (_req, res) => {
+  // REST: list all participants (for creating conversations) — requires JWT
+  app.get('/api/participants', requireAuth, async (_req, res) => {
     const db = getPool();
     const result = await db.query(
       `SELECT id, type, name, display_name, avatar_url, created_at
@@ -49,9 +49,21 @@ async function main(): Promise<void> {
     res.json(participants);
   });
 
-  // REST: get conversation members
-  app.get('/api/conversations/:id/members', async (req, res) => {
+  // REST: get conversation members — requires JWT + membership check
+  app.get('/api/conversations/:id/members', requireAuth, async (req, res) => {
     const db = getPool();
+    const auth = (req as any).auth;
+
+    // Verify requester is a member of this conversation
+    const memberCheck = await db.query(
+      `SELECT 1 FROM conversation_participants WHERE conversation_id = $1 AND participant_id = $2`,
+      [req.params.id, auth.sub]
+    );
+    if (memberCheck.rows.length === 0) {
+      res.status(403).json({ error: 'not a member of this conversation' });
+      return;
+    }
+
     const result = await db.query(
       `SELECT p.id, p.type, p.name, p.display_name, p.avatar_url, p.created_at
        FROM participants p

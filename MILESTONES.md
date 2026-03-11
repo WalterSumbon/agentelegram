@@ -47,11 +47,42 @@
 - 根因：bcrypt 加盐哈希无法直接 WHERE 查找
 - 修复：participants 表新增 `key_prefix` 列（API key 前 8 字符）+ partial index，查询先按 prefix 定位（通常 1 条），再做 1 次 bcrypt。O(N) → 实质 O(1)
 
-## M3：群聊
-- [ ] Group conversation 支持
-- [ ] 多参与者消息 fan-out（人+agent、agent+agent 任意组合）
-- [ ] 前端群聊 UI
-- **验收**：创建一个群聊加入 2 个 agent，发消息后两个 agent 都能收到并分别回复
+## M3：群聊 ✅
+- [x] Group conversation 支持
+- [x] 多参与者消息 fan-out（人+agent、agent+agent 任意组合）
+- [x] 前端群聊 UI（多选参与者 chip、群标题、成员标签、👥 图标 + 成员数 badge）
+- [x] E2E 测试脚本（19 assertions，覆盖注册、认证、群创建、消息 fan-out、并发 streaming、历史验证）
+- [x] Playwright 前端验证（登录、创建群聊、消息收发、agent 回复渲染）
+- **验收**：创建一个群聊加入 2 个 agent，发消息后两个 agent 都能收到并分别回复 ✅
+
+### M3 Code Review 发现的问题及修复
+
+**Critical 修复：**
+
+1. **REST 端点无鉴权（C1）**
+   - 现象：`GET /api/participants` 和 `GET /api/conversations/:id/members` 无需认证，任何人可枚举所有参与者和对话成员
+   - 修复：两个端点均加 `requireAuth` JWT 中间件。members 端点额外校验请求者是对话成员
+   - 前端 API 调用同步增加 `Authorization: Bearer` header
+
+2. **create_conversation 无事务（C2）**
+   - 现象：创建对话（INSERT conversation + N 条 INSERT participant）未包在事务内，中途失败会造成数据不一致
+   - 修复：改用 `pool.connect()` + `BEGIN/COMMIT/ROLLBACK` 事务，participant 改为批量 INSERT
+
+3. **前端类型安全（W2/W3）**
+   - 现象：`User.type` 和 `ConversationInfo.type` 定义为 `string`，失去编译期类型检查
+   - 修复：改为 `'human' | 'agent'` 和 `'direct' | 'group'` 联合类型，`api.ts` 同步修正
+
+**Warning 修复：**
+
+- **W1**：silent `.catch(() => {})` 改为 `.catch((err) => console.error(...))`，不再静默吞错误
+- **W8**：`.new-chat-form` 加 `overflow-y: auto` 防止内容溢出被裁剪
+
+**已知待改进项（非阻塞）：**
+- 重复 direct 对话未去重（W7）
+- 参与者列表固定展示 10 条上限（W4）
+- 创建群聊后 fire-and-forget 无确认（W5）
+- CSS 硬编码 accent 色值（N1）
+- participant-option 缺少键盘可访问性（N4）
 
 ## M4：Agent 管理面板
 - [ ] REST API：agent 状态查询/管理（server 转发到 agent）

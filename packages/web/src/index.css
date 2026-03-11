@@ -1,5 +1,5 @@
 /* ============================================================
-   Agentelegram — M1 Styles
+   Agentelegram — Styles (M1-M3)
    ============================================================ */
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -225,6 +225,8 @@ input:focus {
   flex-direction: column;
   gap: 8px;
   border-bottom: 1px solid var(--border);
+  max-height: 60vh;
+  overflow-y: auto;
 }
 
 .form-actions {
@@ -237,6 +239,126 @@ input:focus {
   flex: 1;
   padding: 8px;
   font-size: 13px;
+}
+
+/* --- Selected participant chips --- */
+.selected-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  background: var(--bg-surface-2);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text);
+  animation: chipIn 0.15s ease-out;
+}
+
+.chip.agent {
+  border-color: var(--accent);
+  background: rgba(108, 92, 231, 0.12);
+}
+
+.agent-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  margin-left: 2px;
+}
+
+.chip-remove {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 14px;
+  cursor: pointer;
+  padding: 0 2px;
+  line-height: 1;
+  transition: color 0.1s;
+}
+
+.chip-remove:hover { color: var(--danger); }
+
+@keyframes chipIn {
+  from { transform: scale(0.8); opacity: 0; }
+  to { transform: scale(1); opacity: 1; }
+}
+
+/* --- Participant picker list --- */
+.participant-list {
+  max-height: 180px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+}
+
+.participant-option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  cursor: pointer;
+  transition: background 0.1s;
+}
+
+.participant-option:hover {
+  background: var(--bg-hover);
+}
+
+.participant-avatar {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--bg-surface-2);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--text);
+  flex-shrink: 0;
+}
+
+.participant-avatar.agent {
+  background: var(--accent);
+  color: #fff;
+}
+
+.participant-info {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.participant-name {
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.participant-type {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.participant-empty {
+  padding: 16px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 12px;
 }
 
 .conversation-list {
@@ -254,12 +376,34 @@ input:focus {
 .conv-item:hover { background: var(--bg-hover); }
 .conv-item.active { background: var(--bg-surface-2); border-left: 3px solid var(--accent); }
 
+.conv-item-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.group-icon {
+  font-size: 14px;
+  flex-shrink: 0;
+}
+
 .conv-label {
   font-size: 14px;
   font-weight: 500;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  flex: 1;
+  min-width: 0;
+}
+
+.member-count {
+  font-size: 11px;
+  color: var(--text-muted);
+  background: var(--bg);
+  padding: 1px 6px;
+  border-radius: 10px;
+  flex-shrink: 0;
 }
 
 .conv-preview {
@@ -295,14 +439,60 @@ input:focus {
 }
 
 .chat-header {
-  padding: 16px 24px;
+  padding: 14px 24px;
   border-bottom: 1px solid var(--border);
   background: var(--bg-surface);
+}
+
+.chat-header-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .chat-header h2 {
   font-size: 16px;
   font-weight: 600;
+}
+
+.chat-header-members {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.member-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 10px 3px 4px;
+  background: var(--bg);
+  border-radius: 14px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.member-chip.agent {
+  color: var(--accent);
+}
+
+.member-avatar {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--bg-surface-2);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 600;
+  font-size: 10px;
+  color: var(--text);
+}
+
+.member-chip.agent .member-avatar {
+  background: var(--accent);
+  color: #fff;
 }
 
 .message-list {

@@ -208,37 +208,57 @@ async function handleCreateConversation(ws: WebSocket, auth: AuthPayload, event:
 
   const convType = participantIds.length <= 2 ? 'direct' : 'group';
 
-  // Create conversation
-  const convResult = await db.query(
-    `INSERT INTO conversations (title, type, created_by)
-     VALUES ($1, $2, $3)
-     RETURNING id, title, type, created_by, created_at, updated_at`,
-    [event.title ?? null, convType, auth.sub]
-  );
-  const conv = convResult.rows[0];
+  // Use a transaction to ensure atomicity (conversation + all participants)
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
 
-  // Add participants
-  for (const pid of participantIds) {
-    await db.query(
-      `INSERT INTO conversation_participants (conversation_id, participant_id, role)
+    // Create conversation
+    const convResult = await client.query(
+      `INSERT INTO conversations (title, type, created_by)
        VALUES ($1, $2, $3)
-       ON CONFLICT DO NOTHING`,
-      [conv.id, pid, pid === auth.sub ? 'owner' : 'member']
+       RETURNING id, title, type, created_by, created_at, updated_at`,
+      [event.title ?? null, convType, auth.sub]
     );
-  }
+    const conv = convResult.rows[0];
 
-  const conversation: Conversation = {
-    id: conv.id,
-    title: conv.title,
-    type: conv.type as 'direct' | 'group',
-    createdBy: conv.created_by,
-    createdAt: Number(conv.created_at),
-    updatedAt: Number(conv.updated_at),
-  };
+    // Batch-insert all participants
+    if (participantIds.length > 0) {
+      const values = participantIds.map((pid, i) =>
+        `($1, $${i * 2 + 2}, $${i * 2 + 3})`
+      ).join(', ');
+      const params: (string | null)[] = [conv.id];
+      for (const pid of participantIds) {
+        params.push(pid, pid === auth.sub ? 'owner' : 'member');
+      }
+      await client.query(
+        `INSERT INTO conversation_participants (conversation_id, participant_id, role)
+         VALUES ${values}
+         ON CONFLICT DO NOTHING`,
+        params
+      );
+    }
 
-  const fullEvent: ServerEvent = { type: 'conversation_created', conversationId: conv.id, conversation };
-  for (const pid of participantIds) {
-    broadcastToParticipant(pid, fullEvent);
+    await client.query('COMMIT');
+
+    const conversation: Conversation = {
+      id: conv.id,
+      title: conv.title,
+      type: conv.type as 'direct' | 'group',
+      createdBy: conv.created_by,
+      createdAt: Number(conv.created_at),
+      updatedAt: Number(conv.updated_at),
+    };
+
+    const fullEvent: ServerEvent = { type: 'conversation_created', conversationId: conv.id, conversation };
+    for (const pid of participantIds) {
+      broadcastToParticipant(pid, fullEvent);
+    }
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
   }
 }
 
