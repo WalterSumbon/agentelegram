@@ -1,11 +1,12 @@
 /**
  * WebSocket chat protocol handler.
  *
- * Authenticates connections via:
- *   - JWT token (query param `token`) — for humans
- *   - API key (query param `apikey`) — for agents
+ * Connections start unauthenticated. The first message MUST be an auth event:
+ *   { type: "auth", token: "<jwt>" }       — for humans
+ *   { type: "auth", apiKey: "<api-key>" }   — for agents
  *
- * Then handles the unified chat protocol events.
+ * After successful auth the server replies with auth_ok and begins
+ * processing regular chat protocol events.
  */
 import type { WebSocket, WebSocketServer } from 'ws';
 import type { IncomingMessage } from 'node:http';
@@ -37,55 +38,66 @@ interface StreamingMessage {
 }
 const streamingMessages = new Map<string, StreamingMessage>();
 
+/** Timeout (ms) for the client to send the auth message after connecting. */
+const AUTH_TIMEOUT_MS = 10_000;
+
 /**
  * Set up WebSocket server event handling.
  */
 export function setupWsHandler(wss: WebSocketServer): void {
-  wss.on('connection', async (ws: WebSocket, req: IncomingMessage) => {
-    const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
-    const token = url.searchParams.get('token');
-    const apikey = url.searchParams.get('apikey');
+  wss.on('connection', (ws: WebSocket, _req: IncomingMessage) => {
+    // --- Unauthenticated phase ---
+    // The client must send { type: "auth", ... } within AUTH_TIMEOUT_MS.
+    let authenticated = false;
+    let auth: AuthPayload | null = null;
 
-    if (!token && !apikey) {
-      sendEvent(ws, { type: 'error', error: { code: 'AUTH_REQUIRED', message: 'missing token or apikey' } });
-      ws.close(4001, 'missing credentials');
-      return;
-    }
-
-    let auth: AuthPayload;
-
-    if (token) {
-      // JWT auth (human)
-      try {
-        auth = jwt.verify(token, JWT_SECRET) as AuthPayload;
-      } catch {
-        sendEvent(ws, { type: 'error', error: { code: 'AUTH_FAILED', message: 'invalid token' } });
-        ws.close(4001, 'invalid token');
-        return;
+    const authTimeout = setTimeout(() => {
+      if (!authenticated) {
+        sendEvent(ws, { type: 'error', error: { code: 'AUTH_TIMEOUT', message: 'auth not received in time' } });
+        ws.close(4001, 'auth timeout');
       }
-    } else {
-      // API key auth (agent)
-      const result = await verifyApiKey(apikey!);
-      if (!result) {
-        sendEvent(ws, { type: 'error', error: { code: 'AUTH_FAILED', message: 'invalid api key' } });
-        ws.close(4001, 'invalid api key');
-        return;
-      }
-      auth = result;
-    }
-
-    console.log(`[ws] authenticated: ${auth.name} (${auth.type}, ${auth.sub})`);
-
-    // Register connection
-    if (!connections.has(auth.sub)) {
-      connections.set(auth.sub, new Set());
-    }
-    connections.get(auth.sub)!.add(ws);
+    }, AUTH_TIMEOUT_MS);
 
     ws.on('message', async (raw) => {
       try {
         const event: ClientEvent = JSON.parse(raw.toString());
-        await handleClientEvent(ws, auth, event);
+
+        if (!authenticated) {
+          // --- First message must be auth ---
+          if (event.type !== 'auth') {
+            sendEvent(ws, { type: 'error', error: { code: 'AUTH_REQUIRED', message: 'first message must be auth' } });
+            ws.close(4001, 'auth required');
+            return;
+          }
+
+          clearTimeout(authTimeout);
+
+          const result = await handleAuth(ws, event);
+          if (!result) return; // ws already closed
+
+          authenticated = true;
+          auth = result;
+
+          console.log(`[ws] authenticated: ${auth.name} (${auth.type}, ${auth.sub})`);
+
+          // Register connection
+          if (!connections.has(auth.sub)) {
+            connections.set(auth.sub, new Set());
+          }
+          connections.get(auth.sub)!.add(ws);
+
+          // Send auth_ok
+          sendEvent(ws, {
+            type: 'auth_ok',
+            participantId: auth.sub,
+            participantName: auth.name,
+            participantType: auth.type,
+          });
+          return;
+        }
+
+        // --- Authenticated — handle regular events ---
+        await handleClientEvent(ws, auth!, event);
       } catch (err) {
         console.error('[ws] bad message:', err);
         sendEvent(ws, { type: 'error', error: { code: 'BAD_MESSAGE', message: 'invalid JSON' } });
@@ -93,6 +105,9 @@ export function setupWsHandler(wss: WebSocketServer): void {
     });
 
     ws.on('close', async () => {
+      clearTimeout(authTimeout);
+      if (!auth) return;
+
       console.log(`[ws] disconnected: ${auth.name}`);
       const set = connections.get(auth.sub);
       if (set) {
@@ -101,7 +116,6 @@ export function setupWsHandler(wss: WebSocketServer): void {
       }
 
       // Clean up orphaned streaming messages from this participant.
-      // If agent disconnects mid-stream, persist partial content or delete empty rows.
       for (const [msgId, streaming] of streamingMessages.entries()) {
         if (streaming.senderId !== auth.sub) continue;
         streamingMessages.delete(msgId);
@@ -109,10 +123,8 @@ export function setupWsHandler(wss: WebSocketServer): void {
         try {
           const db = getPool();
           if (streaming.content.length > 0) {
-            // Persist partial content so it's not lost
             await db.query(`UPDATE messages SET content = $1 WHERE id = $2`, [streaming.content, msgId]);
           } else {
-            // Empty message row — delete it
             await db.query(`DELETE FROM messages WHERE id = $1`, [msgId]);
           }
         } catch (err) {
@@ -121,6 +133,40 @@ export function setupWsHandler(wss: WebSocketServer): void {
       }
     });
   });
+}
+
+// ---------------------------------------------------------------------------
+// Auth handler
+// ---------------------------------------------------------------------------
+
+async function handleAuth(ws: WebSocket, event: ClientEvent): Promise<AuthPayload | null> {
+  const { token, apiKey } = event;
+
+  if (!token && !apiKey) {
+    sendEvent(ws, { type: 'error', error: { code: 'AUTH_REQUIRED', message: 'auth event must include token or apiKey' } });
+    ws.close(4001, 'missing credentials');
+    return null;
+  }
+
+  if (token) {
+    // JWT auth (human)
+    try {
+      return jwt.verify(token, JWT_SECRET) as AuthPayload;
+    } catch {
+      sendEvent(ws, { type: 'error', error: { code: 'AUTH_FAILED', message: 'invalid token' } });
+      ws.close(4001, 'invalid token');
+      return null;
+    }
+  }
+
+  // API key auth (agent)
+  const result = await verifyApiKey(apiKey!);
+  if (!result) {
+    sendEvent(ws, { type: 'error', error: { code: 'AUTH_FAILED', message: 'invalid api key' } });
+    ws.close(4001, 'invalid api key');
+    return null;
+  }
+  return result;
 }
 
 // ---------------------------------------------------------------------------

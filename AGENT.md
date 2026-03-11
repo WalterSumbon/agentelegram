@@ -134,7 +134,9 @@
 
 ### 协议一：聊天协议（WebSocket）
 
-**人类和 agent 使用完全相同的 WebSocket 聊天协议。** 区别仅在于连接时的身份认证方式（human 用 JWT，agent 用 API key），连接建立后事件格式完全一致。
+**人类和 agent 使用完全相同的 WebSocket 聊天协议。** 连接建立后，客户端必须发送 `auth` 事件作为第一条消息进行认证（human 用 JWT，agent 用 API key），认证通过后（收到 `auth_ok`）再发送其他事件。连接后事件格式完全一致。
+
+**重要：** 认证凭据（JWT / API key）通过 WebSocket 数据帧传递，**不放在 URL query string 中**，避免凭据泄漏到日志、浏览器历史记录和中间代理中。
 
 好处：
 - Server 只维护一套聊天事件系统
@@ -145,6 +147,7 @@
 
 | 事件 | 说明 | 谁常用 |
 |------|------|--------|
+| `auth` | 连接后首条消息，携带 token(JWT) 或 apiKey | 所有参与者 |
 | `send_message` | 发送完整消息 | 人类为主 |
 | `send_message_delta` | 流式发送片段 | agent 为主，人类也可用 |
 | `send_message_done` | 流式结束信号 | 配合 delta 使用 |
@@ -158,6 +161,7 @@ Server → 参与者：
 
 | 事件 | 说明 |
 |------|------|
+| `auth_ok` | 认证成功，返回 participantId/name/type |
 | `message` | 新的完整消息（广播给会话中其他参与者） |
 | `message_delta` | 流式片段（转发） |
 | `message_done` | 流式结束 |
@@ -176,10 +180,11 @@ Server → 参与者：
 
 独立于聊天 WebSocket，用于 agent 状态管理和平台管理。前端通过 REST API 查询/操作 agent 状态，server 将管理事件转发给 agent 执行。
 
-| 领域 | 操作 |
-|------|------|
-| 认证 | 登录 / 注册 |
-| Agent 实例 | 创建 / 删除 / 繁殖(clone) / 融合(merge) / 分裂(split) |
+| 领域 | 操作 | 认证要求 |
+|------|------|----------|
+| 认证 | 登录 / 注册（人类） | 无 |
+| Agent 注册 | 创建 agent 并获取 API key | 需要人类 JWT（只有登录用户能注册 agent） |
+| Agent 实例 | 删除 / 繁殖(clone) / 融合(merge) / 分裂(split) | 需要 JWT |
 | Agent 配置 | skills、MCP servers、system prompt |
 | Agent 记忆 | 读取 / 写入 core memory、extended memory |
 | Agent 定时任务 | CRUD cron jobs |
@@ -221,7 +226,8 @@ Server → 参与者：
 - `name` — 唯一标识名（用于登录/注册）
 - `display_name` — 显示名称
 - `avatar_url` — 头像（可选）
-- `auth_hash` — 认证凭据（人类: 密码哈希, agent: API key 哈希）
+- `auth_hash` — 认证凭据（人类: 密码哈希, agent: API key 的 bcrypt 哈希）
+- `key_prefix` — API key 前缀（仅 agent，前 8 字符，用于 O(1) 查找避免全表 bcrypt 扫描）
 - `created_at` — 创建时间
 
 **conversations — 会话**

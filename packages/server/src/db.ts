@@ -31,6 +31,7 @@ export async function initDb(): Promise<void> {
       display_name TEXT NOT NULL,
       avatar_url  TEXT,
       auth_hash   TEXT NOT NULL,
+      key_prefix  TEXT,
       created_at  BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM now()) * 1000)::BIGINT
     );
 
@@ -66,6 +67,15 @@ export async function initDb(): Promise<void> {
 
     CREATE INDEX IF NOT EXISTS idx_conversation_participants_participant
       ON conversation_participants (participant_id);
+
+    CREATE INDEX IF NOT EXISTS idx_participants_key_prefix
+      ON participants (key_prefix) WHERE key_prefix IS NOT NULL;
+
+    -- Migration: add key_prefix column if missing (existing databases)
+    DO $$ BEGIN
+      ALTER TABLE participants ADD COLUMN IF NOT EXISTS key_prefix TEXT;
+    EXCEPTION WHEN duplicate_column THEN NULL;
+    END $$;
   `);
 
   console.log('[db] schema initialized');

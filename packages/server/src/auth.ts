@@ -2,6 +2,7 @@
  * Authentication routes — register & login for human participants + agent registration.
  */
 import { Router } from 'express';
+import type { Request, Response, NextFunction } from 'express';
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
 import { randomBytes } from 'node:crypto';
@@ -10,7 +11,46 @@ import { getPool } from './db.js';
 export const JWT_SECRET = process.env.JWT_SECRET ?? 'agentelegram-dev-secret';
 const SALT_ROUNDS = 10;
 
+/**
+ * Length of the key_prefix stored alongside the bcrypt hash.
+ * Includes the "ag-" prefix, so "ag-a1b2c" = 8 chars total.
+ * This provides enough cardinality for O(1) lookups while leaking
+ * zero practical information (the full key has 128-bit entropy).
+ */
+const KEY_PREFIX_LEN = 8;
+
 export const authRouter = Router();
+
+// ---------------------------------------------------------------------------
+// Middleware: require JWT (Authorization: Bearer <token>)
+// ---------------------------------------------------------------------------
+
+interface JwtPayload {
+  sub: string;
+  name: string;
+  type: string;
+}
+
+function requireAuth(req: Request, res: Response, next: NextFunction): void {
+  const authHeader = req.headers.authorization;
+  if (!authHeader?.startsWith('Bearer ')) {
+    res.status(401).json({ error: 'missing or invalid Authorization header' });
+    return;
+  }
+
+  try {
+    const payload = jwt.verify(authHeader.slice(7), JWT_SECRET) as JwtPayload;
+    // Attach to request for downstream handlers
+    (req as Request & { auth: JwtPayload }).auth = payload;
+    next();
+  } catch {
+    res.status(401).json({ error: 'invalid or expired token' });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Human auth routes (no middleware required)
+// ---------------------------------------------------------------------------
 
 /**
  * POST /api/auth/register
@@ -149,15 +189,20 @@ authRouter.get('/me', async (req, res) => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// Agent registration (requires JWT — only logged-in humans can register agents)
+// ---------------------------------------------------------------------------
+
 /**
  * POST /api/auth/register-agent
+ * Headers: Authorization: Bearer <jwt>
  * Body: { name, displayName }
  * Returns: { participant, apiKey }
  *
  * The raw API key is returned ONCE — it cannot be retrieved later.
- * The server stores only a bcrypt hash of the key.
+ * The server stores only a bcrypt hash + a short prefix for O(1) lookup.
  */
-authRouter.post('/register-agent', async (req, res) => {
+authRouter.post('/register-agent', requireAuth, async (req, res) => {
   const { name, displayName } = req.body;
 
   if (!name || !displayName) {
@@ -175,13 +220,14 @@ authRouter.post('/register-agent', async (req, res) => {
 
   // Generate a random API key: ag-<32 hex chars>
   const apiKey = `ag-${randomBytes(16).toString('hex')}`;
+  const keyPrefix = apiKey.slice(0, KEY_PREFIX_LEN);
   const authHash = await bcrypt.hash(apiKey, SALT_ROUNDS);
 
   const result = await db.query(
-    `INSERT INTO participants (type, name, display_name, auth_hash)
-     VALUES ('agent', $1, $2, $3)
+    `INSERT INTO participants (type, name, display_name, auth_hash, key_prefix)
+     VALUES ('agent', $1, $2, $3, $4)
      RETURNING id, type, name, display_name, avatar_url, created_at`,
-    [name, displayName, authHash]
+    [name, displayName, authHash, keyPrefix]
   );
 
   const row = result.rows[0];
@@ -198,19 +244,26 @@ authRouter.post('/register-agent', async (req, res) => {
   res.status(201).json({ participant, apiKey });
 });
 
+// ---------------------------------------------------------------------------
+// API key verification (used by ws-handler)
+// ---------------------------------------------------------------------------
+
 /**
  * Verify an API key against the database.
+ * Uses key_prefix for O(1) lookup instead of scanning all agents.
  * Returns the auth payload if valid, null otherwise.
  */
 export async function verifyApiKey(apiKey: string): Promise<{ sub: string; name: string; type: string } | null> {
   const db = getPool();
+  const keyPrefix = apiKey.slice(0, KEY_PREFIX_LEN);
 
-  // API keys start with "ag-", look up all agent participants
-  // For efficiency we could add a key prefix column, but for now iterate
+  // O(1) lookup by key_prefix — typically returns exactly 1 row
   const result = await db.query(
-    `SELECT id, name, type, auth_hash FROM participants WHERE type = 'agent'`
+    `SELECT id, name, type, auth_hash FROM participants WHERE type = 'agent' AND key_prefix = $1`,
+    [keyPrefix]
   );
 
+  // Compare against matching rows (usually just 1)
   for (const row of result.rows) {
     const valid = await bcrypt.compare(apiKey, row.auth_hash);
     if (valid) {

@@ -9,6 +9,7 @@ import type { Message, Conversation } from './types.js';
 // ---------------------------------------------------------------------------
 
 export type ClientEventType =
+  | 'auth'
   | 'send_message'
   | 'send_message_delta'
   | 'send_message_done'
@@ -23,6 +24,12 @@ export interface ClientEvent {
 
   /** Target conversation. Required for message/typing/history events. */
   conversationId?: string;
+
+  // -- auth (must be the first message after connection) --
+  /** JWT token for human authentication. */
+  token?: string;
+  /** API key for agent authentication. */
+  apiKey?: string;
 
   // -- send_message --
   content?: string;
@@ -52,6 +59,7 @@ export interface ClientEvent {
 // ---------------------------------------------------------------------------
 
 export type ServerEventType =
+  | 'auth_ok'
   | 'message'
   | 'message_delta'
   | 'message_done'
@@ -68,6 +76,14 @@ export interface ServerEvent {
   type: ServerEventType;
 
   conversationId?: string;
+
+  // -- auth_ok (response to auth event) --
+  /** Authenticated participant ID. */
+  participantId?: string;
+  /** Authenticated participant name. */
+  participantName?: string;
+  /** Participant type: 'human' or 'agent'. */
+  participantType?: string;
 
   // -- message / message_done --
   message?: Message;
@@ -88,8 +104,7 @@ export interface ServerEvent {
   assignedMessageId?: string;
 
   // -- typing --
-  /** Who is typing. */
-  participantId?: string;
+  /** participantId is shared with auth_ok (above). */
   activity?: string;
 
   // -- conversation_created --
