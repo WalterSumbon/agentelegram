@@ -7,17 +7,9 @@ import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
 import { randomBytes } from 'node:crypto';
 import { getPool } from './db.js';
+import { JWT_SECRET, JWT_EXPIRES_IN, SALT_ROUNDS, KEY_PREFIX_LEN } from './config.js';
 
-export const JWT_SECRET = process.env.JWT_SECRET ?? 'agentelegram-dev-secret';
-const SALT_ROUNDS = 10;
-
-/**
- * Length of the key_prefix stored alongside the bcrypt hash.
- * Includes the "ag-" prefix, so "ag-a1b2c" = 8 chars total.
- * This provides enough cardinality for O(1) lookups while leaking
- * zero practical information (the full key has 128-bit entropy).
- */
-const KEY_PREFIX_LEN = 8;
+export { JWT_SECRET };
 
 export const authRouter = Router();
 
@@ -99,7 +91,7 @@ authRouter.post('/register', async (req, res) => {
   };
 
   const token = jwt.sign({ sub: participant.id, name: participant.name, type: 'human' }, JWT_SECRET, {
-    expiresIn: '7d',
+    expiresIn: JWT_EXPIRES_IN,
   });
 
   res.status(201).json({ participant, token });
@@ -147,7 +139,7 @@ authRouter.post('/login', async (req, res) => {
   };
 
   const token = jwt.sign({ sub: participant.id, name: participant.name, type: row.type }, JWT_SECRET, {
-    expiresIn: '7d',
+    expiresIn: JWT_EXPIRES_IN,
   });
 
   res.json({ participant, token });

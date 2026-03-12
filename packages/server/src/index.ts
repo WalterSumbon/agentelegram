@@ -13,8 +13,7 @@ import { initDb, closeDb, getPool } from './db.js';
 import { authRouter, requireAuth } from './auth.js';
 import { managementRouter } from './management.js';
 import { setupWsHandler } from './ws-handler.js';
-
-const PORT = parseInt(process.env.PORT ?? '4000', 10);
+import { PORT } from './config.js';
 
 async function main(): Promise<void> {
   // --- Database ---

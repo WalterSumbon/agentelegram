@@ -3,6 +3,7 @@
  */
 import pg from 'pg';
 import { randomUUID } from 'node:crypto';
+import { DATABASE_URL } from './config.js';
 
 const { Pool } = pg;
 
@@ -11,7 +12,7 @@ let pool: pg.Pool;
 export function getPool(): pg.Pool {
   if (!pool) {
     pool = new Pool({
-      connectionString: process.env.DATABASE_URL ?? 'postgresql://localhost:5432/agentelegram',
+      connectionString: DATABASE_URL,
     });
   }
   return pool;

@@ -8,6 +8,9 @@
  */
 import type { ClientEvent, ServerEvent } from '@agentelegram/shared';
 
+/** Delay (ms) before auto-reconnect after disconnect. */
+const WS_RECONNECT_DELAY_MS = 2000;
+
 type EventHandler = (event: ServerEvent & Record<string, unknown>) => void;
 type ConnectHandler = () => void;
 
@@ -72,7 +75,7 @@ export function connectWs(token: string): void {
     socket = null;
     // Auto-reconnect unless auth failure
     if (ev.code !== 4001 && currentToken) {
-      reconnectTimer = setTimeout(() => connectWs(currentToken!), 2000);
+      reconnectTimer = setTimeout(() => connectWs(currentToken!), WS_RECONNECT_DELAY_MS);
     }
   };
 

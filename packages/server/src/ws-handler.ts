@@ -12,6 +12,7 @@ import type { WebSocket, WebSocketServer } from 'ws';
 import type { IncomingMessage } from 'node:http';
 import jwt from 'jsonwebtoken';
 import { JWT_SECRET, verifyApiKey } from './auth.js';
+import { WS_AUTH_TIMEOUT_MS, WS_MGMT_TIMEOUT_MS } from './config.js';
 import { getPool } from './db.js';
 import type { ClientEvent, ServerEvent, Conversation, MgmtAction } from '@agentelegram/shared';
 import { randomUUID } from 'node:crypto';
@@ -39,11 +40,7 @@ interface StreamingMessage {
 }
 const streamingMessages = new Map<string, StreamingMessage>();
 
-/** Timeout (ms) for the client to send the auth message after connecting. */
-const AUTH_TIMEOUT_MS = 10_000;
-
-/** Timeout (ms) for an agent to respond to a management request. */
-const MGMT_REQUEST_TIMEOUT_MS = 15_000;
+// Timeouts imported from centralized config (WS_AUTH_TIMEOUT_MS, WS_MGMT_TIMEOUT_MS)
 
 // ---------------------------------------------------------------------------
 // Management request-response correlation
@@ -65,7 +62,7 @@ const pendingMgmtRequests = new Map<string, PendingMgmtRequest>();
 export function setupWsHandler(wss: WebSocketServer): void {
   wss.on('connection', (ws: WebSocket, _req: IncomingMessage) => {
     // --- Unauthenticated phase ---
-    // The client must send { type: "auth", ... } within AUTH_TIMEOUT_MS.
+    // The client must send { type: "auth", ... } within WS_AUTH_TIMEOUT_MS.
     let authenticated = false;
     let auth: AuthPayload | null = null;
 
@@ -74,7 +71,7 @@ export function setupWsHandler(wss: WebSocketServer): void {
         sendEvent(ws, { type: 'error', error: { code: 'AUTH_TIMEOUT', message: 'auth not received in time' } });
         ws.close(4001, 'auth timeout');
       }
-    }, AUTH_TIMEOUT_MS);
+    }, WS_AUTH_TIMEOUT_MS);
 
     ws.on('message', async (raw) => {
       try {
@@ -698,7 +695,7 @@ export function sendMgmtRequest(
     const timeout = setTimeout(() => {
       pendingMgmtRequests.delete(requestId);
       reject(new Error('management request timed out'));
-    }, MGMT_REQUEST_TIMEOUT_MS);
+    }, WS_MGMT_TIMEOUT_MS);
 
     pendingMgmtRequests.set(requestId, { resolve, reject, timeout, targetAgentId: agentId });
 
