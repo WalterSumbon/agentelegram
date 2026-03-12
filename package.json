@@ -16,5 +16,8 @@
     "build:shared": "npm run build -w packages/shared",
     "build:server": "npm run build -w packages/server",
     "build:web": "npm run build -w packages/web"
+  },
+  "devDependencies": {
+    "playwright": "^1.58.2"
   }
 }

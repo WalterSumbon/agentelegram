@@ -21,11 +21,12 @@ let authenticated = false;
 
 export function connectWs(token: string): void {
   currentToken = token;
-  authenticated = false;
 
   if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
     return;
   }
+
+  authenticated = false;
 
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   const url = `${protocol}//${window.location.host}/ws`;
@@ -64,9 +65,11 @@ export function connectWs(token: string): void {
 
   ws.onclose = (ev) => {
     console.log('[ws] closed:', ev.code, ev.reason);
+    // Only handle if this is still the active socket (prevents stale-socket races
+    // from React StrictMode double-mount or HMR)
+    if (socket !== ws) return;
     authenticated = false;
-    // Only clear if this is still the active socket (prevents HMR race)
-    if (socket === ws) socket = null;
+    socket = null;
     // Auto-reconnect unless auth failure
     if (ev.code !== 4001 && currentToken) {
       reconnectTimer = setTimeout(() => connectWs(currentToken!), 2000);

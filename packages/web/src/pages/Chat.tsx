@@ -45,7 +45,13 @@ export default function ChatPage() {
           break;
         case 'conversation_created': {
           const conv = (event as any).conversation as ConversationInfo;
-          if (conv) addConversation(conv);
+          if (conv) {
+            addConversation(conv);
+            // Auto-select if this user created the conversation
+            if (conv.createdBy === user?.id) {
+              setActiveConversation(conv.id);
+            }
+          }
           break;
         }
         case 'history':
